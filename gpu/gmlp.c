@@ -24,7 +24,7 @@ int main() {
     generate_synthetic_data(&X, &y, num_samples, input_dim, output_dim);
     
     // Initialize gMLP network on GPU
-    GPU_GMLP* gmlp = init_gpu_gmlp(input_dim, hidden_dim, ffn_dim, output_dim, batch_size);
+    GMLP* gmlp = init_gmlp(input_dim, hidden_dim, ffn_dim, output_dim, batch_size);
     
     // Training parameters
     const int num_epochs = 10000;
@@ -44,17 +44,17 @@ int main() {
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         // Forward pass
-        forward_pass_gpu_gmlp(gmlp, X);
+        forward_pass_gmlp(gmlp, X);
         
         // Calculate loss
-        float loss = calculate_loss_gpu_gmlp(gmlp, y);
+        float loss = calculate_loss_gmlp(gmlp, y);
         
         // Backward pass
-        zero_gradients_gpu_gmlp(gmlp);
-        backward_pass_gpu_gmlp(gmlp, X);
+        zero_gradients_gmlp(gmlp);
+        backward_pass_gmlp(gmlp, X);
         
         // Update weights
-        update_weights_gpu_gmlp(gmlp, learning_rate);
+        update_weights_gmlp(gmlp, learning_rate);
         
         // Print progress
         if ((epoch + 1) % 100 == 0) {
@@ -73,26 +73,26 @@ int main() {
     // Get timestamp for filenames
     char model_fname[64], data_fname[64];
     time_t now = time(NULL);
-    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_gpu_gmlp_model.bin", 
+    strftime(model_fname, sizeof(model_fname), "%Y%m%d_%H%M%S_gmlp_model.bin", 
              localtime(&now));
-    strftime(data_fname, sizeof(data_fname), "%Y%m%d_%H%M%S_gpu_data.csv", 
+    strftime(data_fname, sizeof(data_fname), "%Y%m%d_%H%M%S_data.csv", 
              localtime(&now));
     
     // Save model and data with timestamped filenames
-    save_gpu_gmlp(gmlp, model_fname);
+    save_gmlp(gmlp, model_fname);
     save_data_to_csv(X, y, num_samples, input_dim, output_dim, data_fname);
     
     // Load the model back and verify
     printf("\nVerifying saved model...\n");
     
     // Load the model back with original batch_size
-    GPU_GMLP* loaded_gmlp = load_gpu_gmlp(model_fname, batch_size);
+    GMLP* loaded_gmlp = load_gmlp(model_fname, batch_size);
     
     // Forward pass with loaded model
-    forward_pass_gpu_gmlp(loaded_gmlp, X);
+    forward_pass_gmlp(loaded_gmlp, X);
     
     // Calculate and print loss with loaded model
-    float verification_loss = calculate_loss_gpu_gmlp(loaded_gmlp, y);
+    float verification_loss = calculate_loss_gmlp(loaded_gmlp, y);
     printf("Loss with loaded model: %.8f\n", verification_loss);
     
     printf("\nEvaluating model performance...\n");
@@ -151,8 +151,8 @@ int main() {
     cudaEventDestroy(stop);
     free(X);
     free(y);
-    free_gpu_gmlp(gmlp);
-    free_gpu_gmlp(loaded_gmlp);
+    free_gmlp(gmlp);
+    free_gmlp(loaded_gmlp);
     
     // Final CUDA cleanup
     cudaDeviceReset();

@@ -1,5 +1,5 @@
-#ifndef GPU_GMLP_H
-#define GPU_GMLP_H
+#ifndef GMLP_H
+#define GMLP_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,7 +93,7 @@ typedef struct {
     
     // cuBLAS handle
     cublasHandle_t cublas_handle;
-} GPU_GMLP;
+} GMLP;
 
 // CUDA kernel implementations
 __global__ void gelu_activation_kernel(float* input, int size) {
@@ -165,10 +165,10 @@ void checkCublasErrors(cublasStatus_t status, const char* message) {
 }
 
 // Initialize gMLP network
-GPU_GMLP* init_gpu_gmlp(int input_dim, int hidden_dim, int ffn_dim, int output_dim, int batch_size) {
-    GPU_GMLP* gmlp = (GPU_GMLP*)malloc(sizeof(GPU_GMLP));
+GMLP* init_gmlp(int input_dim, int hidden_dim, int ffn_dim, int output_dim, int batch_size) {
+    GMLP* gmlp = (GMLP*)malloc(sizeof(GMLP));
     if (!gmlp) {
-        printf("Failed to allocate memory for GPU_GMLP\n");
+        printf("Failed to allocate memory for GMLP\n");
         return NULL;
     }
     
@@ -335,7 +335,7 @@ GPU_GMLP* init_gpu_gmlp(int input_dim, int hidden_dim, int ffn_dim, int output_d
 }
 
 // Free network memory
-void free_gpu_gmlp(GPU_GMLP* gmlp) {
+void free_gmlp(GMLP* gmlp) {
     if (!gmlp) return;
     
     // Free weights on host
@@ -409,7 +409,7 @@ void free_gpu_gmlp(GPU_GMLP* gmlp) {
 }
 
 // Forward pass
-void forward_pass_gpu_gmlp(GPU_GMLP* gmlp, float* X) {
+void forward_pass_gmlp(GMLP* gmlp, float* X) {
     int half_hidden = gmlp->hidden_dim / 2;
     
     // Copy input data to device
@@ -498,7 +498,7 @@ void forward_pass_gpu_gmlp(GPU_GMLP* gmlp, float* X) {
 }
 
 // Calculate loss (Mean Squared Error)
-float calculate_loss_gpu_gmlp(GPU_GMLP* gmlp, float* y) {
+float calculate_loss_gmlp(GMLP* gmlp, float* y) {
     // Copy targets to device
     checkCudaErrors(cudaMemcpy(gmlp->d_y, y, gmlp->batch_size * gmlp->output_dim * sizeof(float), 
                    cudaMemcpyHostToDevice), "Copy y to device");
@@ -527,7 +527,7 @@ float calculate_loss_gpu_gmlp(GPU_GMLP* gmlp, float* y) {
 }
 
 // Zero out all gradients
-void zero_gradients_gpu_gmlp(GPU_GMLP* gmlp) {
+void zero_gradients_gmlp(GMLP* gmlp) {
     checkCudaErrors(cudaMemset(gmlp->d_proj_in_weight_grad, 0, gmlp->hidden_dim * gmlp->input_dim * sizeof(float)),
                   "Zero d_proj_in_weight_grad");
     checkCudaErrors(cudaMemset(gmlp->d_sgu_gate_weight_grad, 0, gmlp->ffn_dim * (gmlp->hidden_dim/2) * sizeof(float)),
@@ -541,7 +541,7 @@ void zero_gradients_gpu_gmlp(GPU_GMLP* gmlp) {
 }
 
 // Backward pass
-void backward_pass_gpu_gmlp(GPU_GMLP* gmlp, float* X) {
+void backward_pass_gmlp(GMLP* gmlp, float* X) {
     int half_hidden = gmlp->hidden_dim / 2;
     
     // Prepare constants for cuBLAS
@@ -693,7 +693,7 @@ void backward_pass_gpu_gmlp(GPU_GMLP* gmlp, float* X) {
 }
 
 // Update weights using AdamW
-void update_weights_gpu_gmlp(GPU_GMLP* gmlp, float learning_rate) {
+void update_weights_gmlp(GMLP* gmlp, float learning_rate) {
     gmlp->t++;  // Increment time step
     int half_hidden = gmlp->hidden_dim / 2;
     
@@ -775,7 +775,7 @@ void update_weights_gpu_gmlp(GPU_GMLP* gmlp, float learning_rate) {
 }
 
 // Save model weights to binary file
-void save_gpu_gmlp(GPU_GMLP* gmlp, const char* filename) {
+void save_gmlp(GMLP* gmlp, const char* filename) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
@@ -816,7 +816,7 @@ void save_gpu_gmlp(GPU_GMLP* gmlp, const char* filename) {
 }
 
 // Load model weights from binary file
-GPU_GMLP* load_gpu_gmlp(const char* filename, int custom_batch_size) {
+GMLP* load_gmlp(const char* filename, int custom_batch_size) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
@@ -835,7 +835,7 @@ GPU_GMLP* load_gpu_gmlp(const char* filename, int custom_batch_size) {
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     
     // Initialize network
-    GPU_GMLP* gmlp = init_gpu_gmlp(input_dim, hidden_dim, ffn_dim, output_dim, batch_size);
+    GMLP* gmlp = init_gmlp(input_dim, hidden_dim, ffn_dim, output_dim, batch_size);
     if (!gmlp) {
         fclose(file);
         return NULL;
