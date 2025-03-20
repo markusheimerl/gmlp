@@ -1,5 +1,5 @@
-#ifndef GMLP_H
-#define GMLP_H
+#ifndef GPU_GMLP_H
+#define GPU_GMLP_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,30 +7,6 @@
 #include <math.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-
-// CUDA Error checking macro
-#ifndef CHECK_CUDA
-#define CHECK_CUDA(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        fprintf(stderr, "CUDA error in %s:%d: %s\n", __FILE__, __LINE__, \
-                cudaGetErrorString(err)); \
-        exit(EXIT_FAILURE); \
-    } \
-} while(0)
-#endif
-
-// cuBLAS Error checking macro
-#ifndef CHECK_CUBLAS
-#define CHECK_CUBLAS(call) do { \
-    cublasStatus_t status = call; \
-    if (status != CUBLAS_STATUS_SUCCESS) { \
-        fprintf(stderr, "cuBLAS error in %s:%d: %d\n", __FILE__, __LINE__, \
-                (int)status); \
-        exit(EXIT_FAILURE); \
-    } \
-} while(0)
-#endif
 
 typedef struct {
     // Network dimensions
@@ -42,23 +18,41 @@ typedef struct {
     
     // Weights
     float* proj_in_weight;   // hidden_dim x input_dim
-    float* sgu_gate_weight;  // ffn_dim x hidden_dim
-    float* sgu_proj_weight;  // hidden_dim x ffn_dim
+    float* sgu_gate_weight;  // ffn_dim x (hidden_dim/2)
+    float* sgu_proj_weight;  // ffn_dim x (hidden_dim/2)
+    float* sgu_out_weight;   // hidden_dim x ffn_dim
     float* proj_out_weight;  // output_dim x hidden_dim
     
+    // Device (GPU) weights
+    float* d_proj_in_weight;   
+    float* d_sgu_gate_weight;  
+    float* d_sgu_proj_weight;  
+    float* d_sgu_out_weight;   
+    float* d_proj_out_weight;  
+    
     // Weight gradients
+    float* d_proj_in_weight_grad;
+    float* d_sgu_gate_weight_grad;
+    float* d_sgu_proj_weight_grad;
+    float* d_sgu_out_weight_grad;
+    float* d_proj_out_weight_grad;
+    
+    // Host (CPU) weight gradients for updates
     float* proj_in_weight_grad;
     float* sgu_gate_weight_grad;
     float* sgu_proj_weight_grad;
+    float* sgu_out_weight_grad;
     float* proj_out_weight_grad;
     
-    // Adam optimizer parameters
+    // Adam optimizer parameters (on host)
     float* proj_in_m;
     float* proj_in_v;
     float* sgu_gate_m;
     float* sgu_gate_v;
     float* sgu_proj_m;
     float* sgu_proj_v;
+    float* sgu_out_m;
+    float* sgu_out_v;
     float* proj_out_m;
     float* proj_out_v;
     float beta1;
@@ -68,149 +62,115 @@ typedef struct {
     float weight_decay;
     
     // Intermediate activations for forward/backward pass
-    float* proj_in_output;    // batch_size x hidden_dim
-    float* sgu_gate_output;   // batch_size x ffn_dim
-    float* gate_activated;    // batch_size x ffn_dim
-    float* sgu_proj_input;    // batch_size x ffn_dim
-    float* sgu_output;        // batch_size x hidden_dim
+    float* d_input;           // batch_size x input_dim
+    float* d_proj_in_output;  // batch_size x hidden_dim
+    float* d_u_part;          // batch_size x (hidden_dim/2) - First half for gate
+    float* d_v_part;          // batch_size x (hidden_dim/2) - Second half for projection
+    float* d_sgu_gate_output; // batch_size x ffn_dim
+    float* d_gate_activated;  // batch_size x ffn_dim
+    float* d_sgu_proj_output; // batch_size x ffn_dim
+    float* d_gated_output;    // batch_size x ffn_dim - After applying gate
+    float* d_sgu_output;      // batch_size x hidden_dim
+    float* d_predictions;     // batch_size x output_dim
+    
+    // Input and output on device
+    float* d_X;               // batch_size x input_dim
+    float* d_y;               // batch_size x output_dim
+    
+    // Host predictions for evaluation
     float* predictions;       // batch_size x output_dim
     
     // Intermediate gradients for backward pass
-    float* error;             // batch_size x output_dim
-    float* sgu_output_grad;   // batch_size x hidden_dim
-    float* sgu_proj_grad;     // batch_size x ffn_dim
-    float* gate_activated_grad;  // batch_size x ffn_dim
-    float* sgu_gate_grad;     // batch_size x ffn_dim
-    float* proj_in_grad;      // batch_size x hidden_dim
-    
-    // Device copies
-    float* d_proj_in_weight;
-    float* d_sgu_gate_weight;
-    float* d_sgu_proj_weight;
-    float* d_proj_out_weight;
-    
-    float* d_proj_in_weight_grad;
-    float* d_sgu_gate_weight_grad;
-    float* d_sgu_proj_weight_grad;
-    float* d_proj_out_weight_grad;
-    
-    float* d_proj_in_m;
-    float* d_proj_in_v;
-    float* d_sgu_gate_m;
-    float* d_sgu_gate_v;
-    float* d_sgu_proj_m;
-    float* d_sgu_proj_v;
-    float* d_proj_out_m;
-    float* d_proj_out_v;
-    
-    float* d_proj_in_output;
-    float* d_sgu_gate_output;
-    float* d_gate_activated;
-    float* d_sgu_proj_input;
-    float* d_sgu_output;
-    float* d_predictions;
-    
-    float* d_error;
-    float* d_sgu_output_grad;
-    float* d_sgu_proj_grad;
-    float* d_gate_activated_grad;
-    float* d_sgu_gate_grad;
-    float* d_proj_in_grad;
-    
-    float* d_X;
-    float* d_y;
+    float* d_error;              // batch_size x output_dim
+    float* d_sgu_output_grad;    // batch_size x hidden_dim
+    float* d_gated_output_grad;  // batch_size x ffn_dim
+    float* d_sgu_proj_grad;      // batch_size x ffn_dim
+    float* d_gate_activated_grad;// batch_size x ffn_dim
+    float* d_sgu_gate_grad;      // batch_size x ffn_dim
+    float* d_u_part_grad;        // batch_size x (hidden_dim/2)
+    float* d_v_part_grad;        // batch_size x (hidden_dim/2)
+    float* d_proj_in_grad;       // batch_size x hidden_dim
     
     // cuBLAS handle
     cublasHandle_t cublas_handle;
-} GMLP;
+} GPU_GMLP;
 
-// CUDA kernel for GELU activation
-__global__ void gelu_kernel(float* output, float* input, int size) {
+// CUDA kernel implementations
+__global__ void gelu_activation_kernel(float* input, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float x = input[idx];
         // Approximate GELU: x * 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-        output[idx] = x * 0.5f * (1.0f + tanhf(0.797885f * (x + 0.044715f * x * x * x)));
+        input[idx] = x * 0.5f * (1.0f + tanhf(0.797885f * (x + 0.044715f * x * x * x)));
     }
 }
 
-// CUDA kernel for GELU derivative
-__global__ void gelu_derivative_kernel(float* grad_input, float* x, float* grad_output, int size) {
+__global__ void gelu_backward_kernel(float* grad_out, float* input, float* output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        float val = x[idx];
+        float x = input[idx];
         // Approximate GELU derivative
-        float cdf = 0.5f * (1.0f + tanhf(0.797885f * (val + 0.044715f * val * val * val)));
-        float pdf = 0.797885f * (1.0f + 0.134145f * val * val) * 
-                   (1.0f - tanhf(0.797885f * (val + 0.044715f * val * val * val)) * 
-                          tanhf(0.797885f * (val + 0.044715f * val * val * val)));
-        float gelu_grad = cdf + val * pdf;
-        grad_input[idx] = grad_output[idx] * gelu_grad;
+        float cdf = 0.5f * (1.0f + tanhf(0.797885f * (x + 0.044715f * x * x * x)));
+        float pdf = 0.797885f * (1.0f + 0.134145f * x * x) * 
+                    (1.0f - tanhf(0.797885f * (x + 0.044715f * x * x * x)) * 
+                            tanhf(0.797885f * (x + 0.044715f * x * x * x)));
+        float gelu_grad = cdf + x * pdf;
+        output[idx] = grad_out[idx] * gelu_grad;
     }
 }
 
-// CUDA kernel for sigmoid activation
-__global__ void sigmoid_kernel(float* output, float* input, int size) {
+__global__ void sigmoid_activation_kernel(float* input, float* output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         output[idx] = 1.0f / (1.0f + expf(-input[idx]));
     }
 }
 
-// CUDA kernel for element-wise multiplication
-__global__ void element_wise_multiply_kernel(float* output, float* input, int size) {
+__global__ void multiply_elements_kernel(float* a, float* b, float* output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        output[idx] *= input[idx];
+        output[idx] = a[idx] * b[idx];
     }
 }
 
-// CUDA kernel for sigmoid derivative and gradient calculation
-__global__ void sigmoid_derivative_kernel(float* grad, float* sigmoid_output, float* grad_output, int size) {
+__global__ void error_computation_kernel(float* predictions, float* targets, float* error, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        error[idx] = predictions[idx] - targets[idx];
+    }
+}
+
+__global__ void sigmoid_backward_kernel(float* grad_out, float* sigmoid_output, float* output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float sigmoid = sigmoid_output[idx];
-        grad[idx] = grad_output[idx] * sigmoid * (1.0f - sigmoid);
+        output[idx] = grad_out[idx] * sigmoid * (1.0f - sigmoid);
     }
 }
 
-// CUDA kernel for gate activation gradient
-__global__ void gate_activation_grad_kernel(float* gate_activated_grad, float* sgu_proj_grad, 
-                                          float* sgu_proj_input, float* gate_activated, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        gate_activated_grad[idx] = sgu_proj_grad[idx] * sgu_proj_input[idx] / gate_activated[idx];
+// Utility function to check CUDA errors
+void checkCudaErrors(cudaError_t error, const char* message) {
+    if (error != cudaSuccess) {
+        fprintf(stderr, "CUDA error: %s: %s\n", message, cudaGetErrorString(error));
+        exit(EXIT_FAILURE);
     }
 }
 
-// CUDA kernel for error calculation
-__global__ void calc_error_kernel(float* error, float* predictions, float* y, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        error[idx] = predictions[idx] - y[idx];
-    }
-}
-
-// CUDA kernel for AdamW update
-__global__ void adamw_update_kernel(float* weight, float* grad, float* m, float* v,
-                                  float beta1, float beta2, float epsilon, 
-                                  float learning_rate, float weight_decay, float alpha_t,
-                                  int batch_size, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        float g = grad[idx] / batch_size;
-        
-        m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
-        v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
-        
-        float update = alpha_t * m[idx] / (sqrtf(v[idx]) + epsilon);
-        weight[idx] = weight[idx] * (1.0f - learning_rate * weight_decay) - update;
+// Utility function to check cuBLAS errors
+void checkCublasErrors(cublasStatus_t status, const char* message) {
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "cuBLAS error: %s: %d\n", message, status);
+        exit(EXIT_FAILURE);
     }
 }
 
 // Initialize gMLP network
-GMLP* init_gmlp(int input_dim, int hidden_dim, int ffn_dim, int output_dim, int batch_size) {
-    GMLP* gmlp = (GMLP*)malloc(sizeof(GMLP));
+GPU_GMLP* init_gpu_gmlp(int input_dim, int hidden_dim, int ffn_dim, int output_dim, int batch_size) {
+    GPU_GMLP* gmlp = (GPU_GMLP*)malloc(sizeof(GPU_GMLP));
+    if (!gmlp) {
+        printf("Failed to allocate memory for GPU_GMLP\n");
+        return NULL;
+    }
     
     // Store dimensions
     gmlp->input_dim = input_dim;
@@ -226,200 +186,220 @@ GMLP* init_gmlp(int input_dim, int hidden_dim, int ffn_dim, int output_dim, int 
     gmlp->t = 0;
     gmlp->weight_decay = 0.01f;
     
-    // Initialize cuBLAS
-    CHECK_CUBLAS(cublasCreate(&gmlp->cublas_handle));
+    // Calculate half hidden dimension for SGU
+    int half_hidden = hidden_dim / 2;
     
-    // Allocate host memory
+    // Initialize cuBLAS
+    checkCublasErrors(cublasCreate(&gmlp->cublas_handle), "cublasCreate failed");
+    
+    // Allocate weights on host
     gmlp->proj_in_weight = (float*)malloc(hidden_dim * input_dim * sizeof(float));
-    gmlp->sgu_gate_weight = (float*)malloc(ffn_dim * hidden_dim * sizeof(float));
-    gmlp->sgu_proj_weight = (float*)malloc(hidden_dim * ffn_dim * sizeof(float));
+    gmlp->sgu_gate_weight = (float*)malloc(ffn_dim * half_hidden * sizeof(float));
+    gmlp->sgu_proj_weight = (float*)malloc(ffn_dim * half_hidden * sizeof(float));
+    gmlp->sgu_out_weight = (float*)malloc(hidden_dim * ffn_dim * sizeof(float));
     gmlp->proj_out_weight = (float*)malloc(output_dim * hidden_dim * sizeof(float));
     
+    // Allocate weight gradients on host for updates
     gmlp->proj_in_weight_grad = (float*)malloc(hidden_dim * input_dim * sizeof(float));
-    gmlp->sgu_gate_weight_grad = (float*)malloc(ffn_dim * hidden_dim * sizeof(float));
-    gmlp->sgu_proj_weight_grad = (float*)malloc(hidden_dim * ffn_dim * sizeof(float));
+    gmlp->sgu_gate_weight_grad = (float*)malloc(ffn_dim * half_hidden * sizeof(float));
+    gmlp->sgu_proj_weight_grad = (float*)malloc(ffn_dim * half_hidden * sizeof(float));
+    gmlp->sgu_out_weight_grad = (float*)malloc(hidden_dim * ffn_dim * sizeof(float));
     gmlp->proj_out_weight_grad = (float*)malloc(output_dim * hidden_dim * sizeof(float));
     
+    // Allocate Adam buffers
     gmlp->proj_in_m = (float*)calloc(hidden_dim * input_dim, sizeof(float));
     gmlp->proj_in_v = (float*)calloc(hidden_dim * input_dim, sizeof(float));
-    gmlp->sgu_gate_m = (float*)calloc(ffn_dim * hidden_dim, sizeof(float));
-    gmlp->sgu_gate_v = (float*)calloc(ffn_dim * hidden_dim, sizeof(float));
-    gmlp->sgu_proj_m = (float*)calloc(hidden_dim * ffn_dim, sizeof(float));
-    gmlp->sgu_proj_v = (float*)calloc(hidden_dim * ffn_dim, sizeof(float));
+    gmlp->sgu_gate_m = (float*)calloc(ffn_dim * half_hidden, sizeof(float));
+    gmlp->sgu_gate_v = (float*)calloc(ffn_dim * half_hidden, sizeof(float));
+    gmlp->sgu_proj_m = (float*)calloc(ffn_dim * half_hidden, sizeof(float));
+    gmlp->sgu_proj_v = (float*)calloc(ffn_dim * half_hidden, sizeof(float));
+    gmlp->sgu_out_m = (float*)calloc(hidden_dim * ffn_dim, sizeof(float));
+    gmlp->sgu_out_v = (float*)calloc(hidden_dim * ffn_dim, sizeof(float));
     gmlp->proj_out_m = (float*)calloc(output_dim * hidden_dim, sizeof(float));
     gmlp->proj_out_v = (float*)calloc(output_dim * hidden_dim, sizeof(float));
     
-    gmlp->proj_in_output = (float*)malloc(batch_size * hidden_dim * sizeof(float));
-    gmlp->sgu_gate_output = (float*)malloc(batch_size * ffn_dim * sizeof(float));
-    gmlp->gate_activated = (float*)malloc(batch_size * ffn_dim * sizeof(float));
-    gmlp->sgu_proj_input = (float*)malloc(batch_size * ffn_dim * sizeof(float));
-    gmlp->sgu_output = (float*)malloc(batch_size * hidden_dim * sizeof(float));
+    // Allocate predictions on host for evaluation
     gmlp->predictions = (float*)malloc(batch_size * output_dim * sizeof(float));
     
-    gmlp->error = (float*)malloc(batch_size * output_dim * sizeof(float));
-    gmlp->sgu_output_grad = (float*)malloc(batch_size * hidden_dim * sizeof(float));
-    gmlp->sgu_proj_grad = (float*)malloc(batch_size * ffn_dim * sizeof(float));
-    gmlp->gate_activated_grad = (float*)malloc(batch_size * ffn_dim * sizeof(float));
-    gmlp->sgu_gate_grad = (float*)malloc(batch_size * ffn_dim * sizeof(float));
-    gmlp->proj_in_grad = (float*)malloc(batch_size * hidden_dim * sizeof(float));
+    // Allocate memory on device (GPU)
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_proj_in_weight, hidden_dim * input_dim * sizeof(float)),
+                  "Allocate d_proj_in_weight");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_gate_weight, ffn_dim * half_hidden * sizeof(float)),
+                  "Allocate d_sgu_gate_weight");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_proj_weight, ffn_dim * half_hidden * sizeof(float)),
+                  "Allocate d_sgu_proj_weight");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_out_weight, hidden_dim * ffn_dim * sizeof(float)),
+                  "Allocate d_sgu_out_weight");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_proj_out_weight, output_dim * hidden_dim * sizeof(float)),
+                  "Allocate d_proj_out_weight");
+    
+    // Allocate weight gradients on device
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_proj_in_weight_grad, hidden_dim * input_dim * sizeof(float)),
+                  "Allocate d_proj_in_weight_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_gate_weight_grad, ffn_dim * half_hidden * sizeof(float)),
+                  "Allocate d_sgu_gate_weight_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_proj_weight_grad, ffn_dim * half_hidden * sizeof(float)),
+                  "Allocate d_sgu_proj_weight_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_out_weight_grad, hidden_dim * ffn_dim * sizeof(float)),
+                  "Allocate d_sgu_out_weight_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_proj_out_weight_grad, output_dim * hidden_dim * sizeof(float)),
+                  "Allocate d_proj_out_weight_grad");
+    
+    // Allocate input and output on device
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_X, batch_size * input_dim * sizeof(float)),
+                  "Allocate d_X");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_y, batch_size * output_dim * sizeof(float)),
+                  "Allocate d_y");
+    
+    // Allocate intermediate activations on device
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_proj_in_output, batch_size * hidden_dim * sizeof(float)),
+                  "Allocate d_proj_in_output");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_gate_output, batch_size * ffn_dim * sizeof(float)),
+                  "Allocate d_sgu_gate_output");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_gate_activated, batch_size * ffn_dim * sizeof(float)),
+                  "Allocate d_gate_activated");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_proj_output, batch_size * ffn_dim * sizeof(float)),
+                  "Allocate d_sgu_proj_output");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_gated_output, batch_size * ffn_dim * sizeof(float)),
+                  "Allocate d_gated_output");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_output, batch_size * hidden_dim * sizeof(float)),
+                  "Allocate d_sgu_output");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_predictions, batch_size * output_dim * sizeof(float)),
+                  "Allocate d_predictions");
+    
+    // Allocate intermediate gradients on device
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_error, batch_size * output_dim * sizeof(float)),
+                  "Allocate d_error");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_output_grad, batch_size * hidden_dim * sizeof(float)),
+                  "Allocate d_sgu_output_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_gated_output_grad, batch_size * ffn_dim * sizeof(float)),
+                  "Allocate d_gated_output_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_proj_grad, batch_size * ffn_dim * sizeof(float)),
+                  "Allocate d_sgu_proj_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_gate_activated_grad, batch_size * ffn_dim * sizeof(float)),
+                  "Allocate d_gate_activated_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_sgu_gate_grad, batch_size * ffn_dim * sizeof(float)),
+                  "Allocate d_sgu_gate_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_u_part_grad, batch_size * half_hidden * sizeof(float)),
+                  "Allocate d_u_part_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_v_part_grad, batch_size * half_hidden * sizeof(float)),
+                  "Allocate d_v_part_grad");
+    checkCudaErrors(cudaMalloc((void**)&gmlp->d_proj_in_grad, batch_size * hidden_dim * sizeof(float)),
+                  "Allocate d_proj_in_grad");
+    
+    // Set up u_part and v_part pointers
+    gmlp->d_u_part = gmlp->d_proj_in_output;
+    gmlp->d_v_part = gmlp->d_proj_in_output + batch_size * half_hidden;
     
     // Initialize weights with He initialization
     float scale_in = sqrtf(2.0f / input_dim);
-    float scale_hidden = sqrtf(2.0f / hidden_dim);
+    float scale_half_hidden = sqrtf(2.0f / half_hidden);
     float scale_ffn = sqrtf(2.0f / ffn_dim);
+    float scale_hidden = sqrtf(2.0f / hidden_dim);
     
     for (int i = 0; i < hidden_dim * input_dim; i++) {
         gmlp->proj_in_weight[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_in;
     }
     
-    for (int i = 0; i < ffn_dim * hidden_dim; i++) {
-        gmlp->sgu_gate_weight[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_hidden;
+    for (int i = 0; i < ffn_dim * half_hidden; i++) {
+        gmlp->sgu_gate_weight[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_half_hidden;
+        gmlp->sgu_proj_weight[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_half_hidden;
     }
     
     for (int i = 0; i < hidden_dim * ffn_dim; i++) {
-        gmlp->sgu_proj_weight[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_ffn;
+        gmlp->sgu_out_weight[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_ffn;
     }
     
     for (int i = 0; i < output_dim * hidden_dim; i++) {
         gmlp->proj_out_weight[i] = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * scale_hidden;
     }
     
-    // Allocate device memory
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_in_weight, hidden_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_gate_weight, ffn_dim * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_proj_weight, hidden_dim * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_out_weight, output_dim * hidden_dim * sizeof(float)));
-    
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_in_weight_grad, hidden_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_gate_weight_grad, ffn_dim * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_proj_weight_grad, hidden_dim * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_out_weight_grad, output_dim * hidden_dim * sizeof(float)));
-    
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_in_m, hidden_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_in_v, hidden_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_gate_m, ffn_dim * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_gate_v, ffn_dim * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_proj_m, hidden_dim * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_proj_v, hidden_dim * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_out_m, output_dim * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_out_v, output_dim * hidden_dim * sizeof(float)));
-    
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_in_output, batch_size * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_gate_output, batch_size * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_gate_activated, batch_size * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_proj_input, batch_size * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_output, batch_size * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_predictions, batch_size * output_dim * sizeof(float)));
-    
-    CHECK_CUDA(cudaMalloc(&gmlp->d_error, batch_size * output_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_output_grad, batch_size * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_proj_grad, batch_size * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_gate_activated_grad, batch_size * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_sgu_gate_grad, batch_size * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_proj_in_grad, batch_size * hidden_dim * sizeof(float)));
-    
-    CHECK_CUDA(cudaMalloc(&gmlp->d_X, batch_size * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&gmlp->d_y, batch_size * output_dim * sizeof(float)));
-    
-    // Copy weights to device
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_in_weight, gmlp->proj_in_weight, 
-                         hidden_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_gate_weight, gmlp->sgu_gate_weight, 
-                         ffn_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_proj_weight, gmlp->sgu_proj_weight, 
-                         hidden_dim * ffn_dim * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_out_weight, gmlp->proj_out_weight, 
-                         output_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice));
-    
-    // Initialize Adam buffers to zero
-    CHECK_CUDA(cudaMemset(gmlp->d_proj_in_m, 0, hidden_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_proj_in_v, 0, hidden_dim * input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_sgu_gate_m, 0, ffn_dim * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_sgu_gate_v, 0, ffn_dim * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_sgu_proj_m, 0, hidden_dim * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_sgu_proj_v, 0, hidden_dim * ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_proj_out_m, 0, output_dim * hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_proj_out_v, 0, output_dim * hidden_dim * sizeof(float)));
+    // Copy initialized weights to device
+    checkCudaErrors(cudaMemcpy(gmlp->d_proj_in_weight, gmlp->proj_in_weight, 
+                   hidden_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy proj_in_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_gate_weight, gmlp->sgu_gate_weight, 
+                   ffn_dim * half_hidden * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy sgu_gate_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_proj_weight, gmlp->sgu_proj_weight, 
+                   ffn_dim * half_hidden * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy sgu_proj_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_out_weight, gmlp->sgu_out_weight, 
+                   hidden_dim * ffn_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy sgu_out_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_proj_out_weight, gmlp->proj_out_weight, 
+                   output_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy proj_out_weight to device");
     
     return gmlp;
 }
 
 // Free network memory
-void free_gmlp(GMLP* gmlp) {
-    // Free weights
-    free(gmlp->proj_in_weight);
-    free(gmlp->sgu_gate_weight);
-    free(gmlp->sgu_proj_weight);
-    free(gmlp->proj_out_weight);
+void free_gpu_gmlp(GPU_GMLP* gmlp) {
+    if (!gmlp) return;
     
-    // Free gradients
-    free(gmlp->proj_in_weight_grad);
-    free(gmlp->sgu_gate_weight_grad);
-    free(gmlp->sgu_proj_weight_grad);
-    free(gmlp->proj_out_weight_grad);
+    // Free weights on host
+    if (gmlp->proj_in_weight) free(gmlp->proj_in_weight);
+    if (gmlp->sgu_gate_weight) free(gmlp->sgu_gate_weight);
+    if (gmlp->sgu_proj_weight) free(gmlp->sgu_proj_weight);
+    if (gmlp->sgu_out_weight) free(gmlp->sgu_out_weight);
+    if (gmlp->proj_out_weight) free(gmlp->proj_out_weight);
+    
+    // Free gradients on host
+    if (gmlp->proj_in_weight_grad) free(gmlp->proj_in_weight_grad);
+    if (gmlp->sgu_gate_weight_grad) free(gmlp->sgu_gate_weight_grad);
+    if (gmlp->sgu_proj_weight_grad) free(gmlp->sgu_proj_weight_grad);
+    if (gmlp->sgu_out_weight_grad) free(gmlp->sgu_out_weight_grad);
+    if (gmlp->proj_out_weight_grad) free(gmlp->proj_out_weight_grad);
     
     // Free Adam buffers
-    free(gmlp->proj_in_m);
-    free(gmlp->proj_in_v);
-    free(gmlp->sgu_gate_m);
-    free(gmlp->sgu_gate_v);
-    free(gmlp->sgu_proj_m);
-    free(gmlp->sgu_proj_v);
-    free(gmlp->proj_out_m);
-    free(gmlp->proj_out_v);
+    if (gmlp->proj_in_m) free(gmlp->proj_in_m);
+    if (gmlp->proj_in_v) free(gmlp->proj_in_v);
+    if (gmlp->sgu_gate_m) free(gmlp->sgu_gate_m);
+    if (gmlp->sgu_gate_v) free(gmlp->sgu_gate_v);
+    if (gmlp->sgu_proj_m) free(gmlp->sgu_proj_m);
+    if (gmlp->sgu_proj_v) free(gmlp->sgu_proj_v);
+    if (gmlp->sgu_out_m) free(gmlp->sgu_out_m);
+    if (gmlp->sgu_out_v) free(gmlp->sgu_out_v);
+    if (gmlp->proj_out_m) free(gmlp->proj_out_m);
+    if (gmlp->proj_out_v) free(gmlp->proj_out_v);
     
-    // Free intermediate activations
-    free(gmlp->proj_in_output);
-    free(gmlp->sgu_gate_output);
-    free(gmlp->gate_activated);
-    free(gmlp->sgu_proj_input);
-    free(gmlp->sgu_output);
-    free(gmlp->predictions);
-    
-    // Free intermediate gradients
-    free(gmlp->error);
-    free(gmlp->sgu_output_grad);
-    free(gmlp->sgu_proj_grad);
-    free(gmlp->gate_activated_grad);
-    free(gmlp->sgu_gate_grad);
-    free(gmlp->proj_in_grad);
+    // Free predictions on host
+    if (gmlp->predictions) free(gmlp->predictions);
     
     // Free device memory
     cudaFree(gmlp->d_proj_in_weight);
     cudaFree(gmlp->d_sgu_gate_weight);
     cudaFree(gmlp->d_sgu_proj_weight);
+    cudaFree(gmlp->d_sgu_out_weight);
     cudaFree(gmlp->d_proj_out_weight);
     
     cudaFree(gmlp->d_proj_in_weight_grad);
     cudaFree(gmlp->d_sgu_gate_weight_grad);
     cudaFree(gmlp->d_sgu_proj_weight_grad);
+    cudaFree(gmlp->d_sgu_out_weight_grad);
     cudaFree(gmlp->d_proj_out_weight_grad);
     
-    cudaFree(gmlp->d_proj_in_m);
-    cudaFree(gmlp->d_proj_in_v);
-    cudaFree(gmlp->d_sgu_gate_m);
-    cudaFree(gmlp->d_sgu_gate_v);
-    cudaFree(gmlp->d_sgu_proj_m);
-    cudaFree(gmlp->d_sgu_proj_v);
-    cudaFree(gmlp->d_proj_out_m);
-    cudaFree(gmlp->d_proj_out_v);
+    cudaFree(gmlp->d_X);
+    cudaFree(gmlp->d_y);
     
     cudaFree(gmlp->d_proj_in_output);
     cudaFree(gmlp->d_sgu_gate_output);
     cudaFree(gmlp->d_gate_activated);
-    cudaFree(gmlp->d_sgu_proj_input);
+    cudaFree(gmlp->d_sgu_proj_output);
+    cudaFree(gmlp->d_gated_output);
     cudaFree(gmlp->d_sgu_output);
     cudaFree(gmlp->d_predictions);
     
     cudaFree(gmlp->d_error);
     cudaFree(gmlp->d_sgu_output_grad);
+    cudaFree(gmlp->d_gated_output_grad);
     cudaFree(gmlp->d_sgu_proj_grad);
     cudaFree(gmlp->d_gate_activated_grad);
     cudaFree(gmlp->d_sgu_gate_grad);
+    cudaFree(gmlp->d_u_part_grad);
+    cudaFree(gmlp->d_v_part_grad);
     cudaFree(gmlp->d_proj_in_grad);
-    
-    cudaFree(gmlp->d_X);
-    cudaFree(gmlp->d_y);
     
     // Destroy cuBLAS handle
     cublasDestroy(gmlp->cublas_handle);
@@ -429,452 +409,380 @@ void free_gmlp(GMLP* gmlp) {
 }
 
 // Forward pass
-void forward_pass_gmlp(GMLP* gmlp, float* X) {
-    // Copy input data to device
-    CHECK_CUDA(cudaMemcpy(gmlp->d_X, X, gmlp->batch_size * gmlp->input_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
+void forward_pass_gpu_gmlp(GPU_GMLP* gmlp, float* X) {
+    int half_hidden = gmlp->hidden_dim / 2;
     
+    // Copy input data to device
+    checkCudaErrors(cudaMemcpy(gmlp->d_X, X, gmlp->batch_size * gmlp->input_dim * sizeof(float), 
+                   cudaMemcpyHostToDevice), "Copy X to device");
+    
+    // Prepare constants for cuBLAS
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    int block_size = 256;
-    int num_blocks;
     
     // 1. Input projection: X → hidden_dim
-    // Note: cuBLAS uses column-major format, but we work with row-major data
-    // So we compute: (gmlp->proj_in_weight)^T * X^T = (X * gmlp->proj_in_weight)^T
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_T, CUBLAS_OP_T,
-                            gmlp->hidden_dim, gmlp->batch_size, gmlp->input_dim,
-                            &alpha,
-                            gmlp->d_proj_in_weight, gmlp->input_dim,
-                            gmlp->d_X, gmlp->input_dim,
-                            &beta,
-                            gmlp->d_proj_in_output, gmlp->hidden_dim));
-    
-    // Store a copy before applying GELU
-    float* d_pre_activation;
-    CHECK_CUDA(cudaMalloc(&d_pre_activation, gmlp->batch_size * gmlp->hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemcpy(d_pre_activation, gmlp->d_proj_in_output, 
-                         gmlp->batch_size * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToDevice));
+    // Note: cuBLAS uses column-major order, transpose the operation
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                 gmlp->hidden_dim, gmlp->batch_size, gmlp->input_dim,
+                                 &alpha,
+                                 gmlp->d_proj_in_weight, gmlp->hidden_dim,
+                                 gmlp->d_X, gmlp->input_dim,
+                                 &beta,
+                                 gmlp->d_proj_in_output, gmlp->hidden_dim), 
+                      "Input projection forward");
     
     // Apply GELU activation to the input projection
-    num_blocks = (gmlp->batch_size * gmlp->hidden_dim + block_size - 1) / block_size;
-    gelu_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_proj_in_output,
-        d_pre_activation,
-        gmlp->batch_size * gmlp->hidden_dim
-    );
+    int block_size = 256;
+    int num_blocks = (gmlp->batch_size * gmlp->hidden_dim + block_size - 1) / block_size;
+    gelu_activation_kernel<<<num_blocks, block_size>>>(gmlp->d_proj_in_output, 
+                                                      gmlp->batch_size * gmlp->hidden_dim);
+    checkCudaErrors(cudaGetLastError(), "GELU activation kernel launch");
     
     // 2. Spatial Gating Unit (SGU)
-    // 2a. Compute gate values
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_T, CUBLAS_OP_T,
-                            gmlp->ffn_dim, gmlp->batch_size, gmlp->hidden_dim,
-                            &alpha,
-                            gmlp->d_sgu_gate_weight, gmlp->hidden_dim,
-                            gmlp->d_proj_in_output, gmlp->hidden_dim,
-                            &beta,
-                            gmlp->d_sgu_gate_output, gmlp->ffn_dim));
+    // 2a. Compute gate values from first half of hidden states (u)
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                 gmlp->ffn_dim, gmlp->batch_size, half_hidden,
+                                 &alpha,
+                                 gmlp->d_sgu_gate_weight, gmlp->ffn_dim,
+                                 gmlp->d_u_part, half_hidden,
+                                 &beta,
+                                 gmlp->d_sgu_gate_output, gmlp->ffn_dim),
+                      "SGU gate forward");
     
     // Apply sigmoid activation to gate values
     num_blocks = (gmlp->batch_size * gmlp->ffn_dim + block_size - 1) / block_size;
-    sigmoid_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_gate_activated,
-        gmlp->d_sgu_gate_output,
-        gmlp->batch_size * gmlp->ffn_dim
-    );
+    sigmoid_activation_kernel<<<num_blocks, block_size>>>(gmlp->d_sgu_gate_output, gmlp->d_gate_activated, 
+                                                         gmlp->batch_size * gmlp->ffn_dim);
+    checkCudaErrors(cudaGetLastError(), "Sigmoid activation kernel launch");
     
-    // 2b. Project to FFN dimension (for element-wise multiplication with gate)
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_T, CUBLAS_OP_T,
-                            gmlp->ffn_dim, gmlp->batch_size, gmlp->hidden_dim,
-                            &alpha,
-                            gmlp->d_sgu_gate_weight, gmlp->hidden_dim,
-                            gmlp->d_proj_in_output, gmlp->hidden_dim,
-                            &beta,
-                            gmlp->d_sgu_proj_input, gmlp->ffn_dim));
+    // 2b. Project second half of hidden states (v) to FFN dimension
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                 gmlp->ffn_dim, gmlp->batch_size, half_hidden,
+                                 &alpha,
+                                 gmlp->d_sgu_proj_weight, gmlp->ffn_dim,
+                                 gmlp->d_v_part, half_hidden,
+                                 &beta,
+                                 gmlp->d_sgu_proj_output, gmlp->ffn_dim),
+                      "SGU projection forward");
     
     // 2c. Apply gating (element-wise multiplication)
-    element_wise_multiply_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_sgu_proj_input,
-        gmlp->d_gate_activated,
-        gmlp->batch_size * gmlp->ffn_dim
-    );
+    num_blocks = (gmlp->batch_size * gmlp->ffn_dim + block_size - 1) / block_size;
+    multiply_elements_kernel<<<num_blocks, block_size>>>(gmlp->d_sgu_proj_output, gmlp->d_gate_activated, 
+                                                        gmlp->d_gated_output, gmlp->batch_size * gmlp->ffn_dim);
+    checkCudaErrors(cudaGetLastError(), "Element-wise multiplication kernel launch");
     
     // 2d. Project back to hidden dimension
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_T, CUBLAS_OP_T,
-                            gmlp->hidden_dim, gmlp->batch_size, gmlp->ffn_dim,
-                            &alpha,
-                            gmlp->d_sgu_proj_weight, gmlp->ffn_dim,
-                            gmlp->d_sgu_proj_input, gmlp->ffn_dim,
-                            &beta,
-                            gmlp->d_sgu_output, gmlp->hidden_dim));
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                 gmlp->hidden_dim, gmlp->batch_size, gmlp->ffn_dim,
+                                 &alpha,
+                                 gmlp->d_sgu_out_weight, gmlp->hidden_dim,
+                                 gmlp->d_gated_output, gmlp->ffn_dim,
+                                 &beta,
+                                 gmlp->d_sgu_output, gmlp->hidden_dim),
+                      "SGU output forward");
     
     // 3. Output projection: hidden_dim → output_dim
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_T, CUBLAS_OP_T,
-                            gmlp->output_dim, gmlp->batch_size, gmlp->hidden_dim,
-                            &alpha,
-                            gmlp->d_proj_out_weight, gmlp->hidden_dim,
-                            gmlp->d_sgu_output, gmlp->hidden_dim,
-                            &beta,
-                            gmlp->d_predictions, gmlp->output_dim));
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                                 gmlp->output_dim, gmlp->batch_size, gmlp->hidden_dim,
+                                 &alpha,
+                                 gmlp->d_proj_out_weight, gmlp->output_dim,
+                                 gmlp->d_sgu_output, gmlp->hidden_dim,
+                                 &beta,
+                                 gmlp->d_predictions, gmlp->output_dim),
+                      "Output projection forward");
     
-    // Copy predictions back to host
-    CHECK_CUDA(cudaMemcpy(gmlp->predictions, gmlp->d_predictions,
-                         gmlp->batch_size * gmlp->output_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    
-    // Free temporary memory
-    cudaFree(d_pre_activation);
+    // Copy predictions back to host for evaluation
+    checkCudaErrors(cudaMemcpy(gmlp->predictions, gmlp->d_predictions, 
+                   gmlp->batch_size * gmlp->output_dim * sizeof(float), cudaMemcpyDeviceToHost),
+                   "Copy predictions to host");
 }
 
 // Calculate loss (Mean Squared Error)
-float calculate_loss_gmlp(GMLP* gmlp, float* y) {
-    // Copy target to device
-    CHECK_CUDA(cudaMemcpy(gmlp->d_y, y, gmlp->batch_size * gmlp->output_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
+float calculate_loss_gpu_gmlp(GPU_GMLP* gmlp, float* y) {
+    // Copy targets to device
+    checkCudaErrors(cudaMemcpy(gmlp->d_y, y, gmlp->batch_size * gmlp->output_dim * sizeof(float), 
+                   cudaMemcpyHostToDevice), "Copy y to device");
     
-    // Calculate error on device
+    // Compute error
     int block_size = 256;
     int num_blocks = (gmlp->batch_size * gmlp->output_dim + block_size - 1) / block_size;
-    calc_error_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_error,
-        gmlp->d_predictions,
-        gmlp->d_y,
-        gmlp->batch_size * gmlp->output_dim
-    );
+    error_computation_kernel<<<num_blocks, block_size>>>(gmlp->d_predictions, gmlp->d_y, 
+                                                        gmlp->d_error, gmlp->batch_size * gmlp->output_dim);
+    checkCudaErrors(cudaGetLastError(), "Error computation kernel launch");
     
-    // Copy error back to host for loss calculation
-    CHECK_CUDA(cudaMemcpy(gmlp->error, gmlp->d_error,
-                         gmlp->batch_size * gmlp->output_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
+    // Copy error back to host to compute loss
+    float* host_error = (float*)malloc(gmlp->batch_size * gmlp->output_dim * sizeof(float));
+    checkCudaErrors(cudaMemcpy(host_error, gmlp->d_error, gmlp->batch_size * gmlp->output_dim * sizeof(float), 
+                   cudaMemcpyDeviceToHost), "Copy error to host");
     
+    // Compute mean squared error
     float loss = 0.0f;
     for (int i = 0; i < gmlp->batch_size * gmlp->output_dim; i++) {
-        loss += gmlp->error[i] * gmlp->error[i];
+        loss += host_error[i] * host_error[i];
     }
-    return loss / (gmlp->batch_size * gmlp->output_dim);
+    loss /= (gmlp->batch_size * gmlp->output_dim);
+    
+    free(host_error);
+    return loss;
 }
 
 // Zero out all gradients
-void zero_gradients_gmlp(GMLP* gmlp) {
-    CHECK_CUDA(cudaMemset(gmlp->d_proj_in_weight_grad, 0, 
-                         gmlp->hidden_dim * gmlp->input_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_sgu_gate_weight_grad, 0, 
-                         gmlp->ffn_dim * gmlp->hidden_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_sgu_proj_weight_grad, 0, 
-                         gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float)));
-    CHECK_CUDA(cudaMemset(gmlp->d_proj_out_weight_grad, 0, 
-                         gmlp->output_dim * gmlp->hidden_dim * sizeof(float)));
+void zero_gradients_gpu_gmlp(GPU_GMLP* gmlp) {
+    checkCudaErrors(cudaMemset(gmlp->d_proj_in_weight_grad, 0, gmlp->hidden_dim * gmlp->input_dim * sizeof(float)),
+                  "Zero d_proj_in_weight_grad");
+    checkCudaErrors(cudaMemset(gmlp->d_sgu_gate_weight_grad, 0, gmlp->ffn_dim * (gmlp->hidden_dim/2) * sizeof(float)),
+                  "Zero d_sgu_gate_weight_grad");
+    checkCudaErrors(cudaMemset(gmlp->d_sgu_proj_weight_grad, 0, gmlp->ffn_dim * (gmlp->hidden_dim/2) * sizeof(float)),
+                  "Zero d_sgu_proj_weight_grad");
+    checkCudaErrors(cudaMemset(gmlp->d_sgu_out_weight_grad, 0, gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float)),
+                  "Zero d_sgu_out_weight_grad");
+    checkCudaErrors(cudaMemset(gmlp->d_proj_out_weight_grad, 0, gmlp->output_dim * gmlp->hidden_dim * sizeof(float)),
+                  "Zero d_proj_out_weight_grad");
 }
 
 // Backward pass
-void backward_pass_gmlp(GMLP* gmlp, float* X) {
-    // Ensure input data is on device
-    CHECK_CUDA(cudaMemcpy(gmlp->d_X, X, gmlp->batch_size * gmlp->input_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
+void backward_pass_gpu_gmlp(GPU_GMLP* gmlp, float* X) {
+    int half_hidden = gmlp->hidden_dim / 2;
     
-    // Need to recompute the forward pass for backwards
-    float* d_pre_activation;
-    CHECK_CUDA(cudaMalloc(&d_pre_activation, gmlp->batch_size * gmlp->hidden_dim * sizeof(float)));
-    
+    // Prepare constants for cuBLAS
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    const float add_beta = 1.0f; // For accumulation
     
     // 1. Gradient of output projection
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_T,
-                            gmlp->hidden_dim, gmlp->output_dim, gmlp->batch_size,
-                            &alpha,
-                            gmlp->d_sgu_output, gmlp->hidden_dim,
-                            gmlp->d_error, gmlp->output_dim,
-                            &beta,
-                            gmlp->d_proj_out_weight_grad, gmlp->output_dim));
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                 gmlp->output_dim, gmlp->hidden_dim, gmlp->batch_size,
+                                 &alpha,
+                                 gmlp->d_error, gmlp->output_dim,
+                                 gmlp->d_sgu_output, gmlp->hidden_dim,
+                                 &beta,
+                                 gmlp->d_proj_out_weight_grad, gmlp->output_dim),
+                      "Output projection weight gradient");
     
     // 2. Gradient flowing back to SGU output
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_N,
-                            gmlp->hidden_dim, gmlp->batch_size, gmlp->output_dim,
-                            &alpha,
-                            gmlp->d_proj_out_weight, gmlp->hidden_dim,
-                            gmlp->d_error, gmlp->output_dim,
-                            &beta,
-                            gmlp->d_sgu_output_grad, gmlp->hidden_dim));
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                                 gmlp->hidden_dim, gmlp->batch_size, gmlp->output_dim,
+                                 &alpha,
+                                 gmlp->d_proj_out_weight, gmlp->output_dim,
+                                 gmlp->d_error, gmlp->output_dim,
+                                 &beta,
+                                 gmlp->d_sgu_output_grad, gmlp->hidden_dim),
+                      "Gradient to SGU output");
     
-    // 3. Gradient of SGU projection (from hidden_dim back to ffn_dim)
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_T,
-                            gmlp->ffn_dim, gmlp->hidden_dim, gmlp->batch_size,
-                            &alpha,
-                            gmlp->d_sgu_proj_input, gmlp->ffn_dim,
-                            gmlp->d_sgu_output_grad, gmlp->hidden_dim,
-                            &beta,
-                            gmlp->d_sgu_proj_weight_grad, gmlp->hidden_dim));
+    // 3. Gradient of SGU output weight
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                 gmlp->hidden_dim, gmlp->ffn_dim, gmlp->batch_size,
+                                 &alpha,
+                                 gmlp->d_sgu_output_grad, gmlp->hidden_dim,
+                                 gmlp->d_gated_output, gmlp->ffn_dim,
+                                 &beta,
+                                 gmlp->d_sgu_out_weight_grad, gmlp->hidden_dim),
+                      "SGU output weight gradient");
     
-    // 4. Gradient flowing through SGU projection to gated input
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_T, CUBLAS_OP_N,
-                            gmlp->ffn_dim, gmlp->batch_size, gmlp->hidden_dim,
-                            &alpha,
-                            gmlp->d_sgu_proj_weight, gmlp->ffn_dim,
-                            gmlp->d_sgu_output_grad, gmlp->hidden_dim,
-                            &beta,
-                            gmlp->d_sgu_proj_grad, gmlp->ffn_dim));
+    // 4. Gradient flowing back to gated_output
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                                 gmlp->ffn_dim, gmlp->batch_size, gmlp->hidden_dim,
+                                 &alpha,
+                                 gmlp->d_sgu_out_weight, gmlp->hidden_dim,
+                                 gmlp->d_sgu_output_grad, gmlp->hidden_dim,
+                                 &beta,
+                                 gmlp->d_gated_output_grad, gmlp->ffn_dim),
+                      "Gradient to gated output");
     
     // 5. Gradient through the gating mechanism
-    // 5a. Gradient to gate activation
+    // 5a. Gradient to sgu_proj_output
     int block_size = 256;
     int num_blocks = (gmlp->batch_size * gmlp->ffn_dim + block_size - 1) / block_size;
-    gate_activation_grad_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_gate_activated_grad,
-        gmlp->d_sgu_proj_grad,
-        gmlp->d_sgu_proj_input,
-        gmlp->d_gate_activated,
-        gmlp->batch_size * gmlp->ffn_dim
-    );
+    multiply_elements_kernel<<<num_blocks, block_size>>>(gmlp->d_gated_output_grad, gmlp->d_gate_activated, 
+                                                        gmlp->d_sgu_proj_grad, gmlp->batch_size * gmlp->ffn_dim);
+    checkCudaErrors(cudaGetLastError(), "Gradient to SGU proj output kernel launch");
     
-    // 5b. Gradient through sigmoid
-    sigmoid_derivative_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_sgu_gate_grad,
-        gmlp->d_gate_activated,
-        gmlp->d_gate_activated_grad,
-        gmlp->batch_size * gmlp->ffn_dim
-    );
+    // 5b. Gradient to gate_activated
+    multiply_elements_kernel<<<num_blocks, block_size>>>(gmlp->d_gated_output_grad, gmlp->d_sgu_proj_output, 
+                                                        gmlp->d_gate_activated_grad, gmlp->batch_size * gmlp->ffn_dim);
+    checkCudaErrors(cudaGetLastError(), "Gradient to gate activated kernel launch");
     
-    // 6. Gradient to gate weights
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_T,
-                            gmlp->hidden_dim, gmlp->ffn_dim, gmlp->batch_size,
-                            &alpha,
-                            gmlp->d_proj_in_output, gmlp->hidden_dim,
-                            gmlp->d_sgu_gate_grad, gmlp->ffn_dim,
-                            &beta,
-                            gmlp->d_sgu_gate_weight_grad, gmlp->ffn_dim));
+    // 5c. Gradient through sigmoid for gate
+    sigmoid_backward_kernel<<<num_blocks, block_size>>>(gmlp->d_gate_activated_grad, gmlp->d_gate_activated, 
+                                                       gmlp->d_sgu_gate_grad, gmlp->batch_size * gmlp->ffn_dim);
+    checkCudaErrors(cudaGetLastError(), "Sigmoid backward kernel launch");
     
-    // 7. Gradient flowing back to the input projection
-    // 7a. From the gate
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_N,
-                            gmlp->hidden_dim, gmlp->batch_size, gmlp->ffn_dim,
-                            &alpha,
-                            gmlp->d_sgu_gate_weight, gmlp->hidden_dim,
-                            gmlp->d_sgu_gate_grad, gmlp->ffn_dim,
-                            &beta,
-                            gmlp->d_proj_in_grad, gmlp->hidden_dim));
+    // 6. Gradient of sgu_proj_weight
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                 gmlp->ffn_dim, half_hidden, gmlp->batch_size,
+                                 &alpha,
+                                 gmlp->d_sgu_proj_grad, gmlp->ffn_dim,
+                                 gmlp->d_v_part, half_hidden,
+                                 &beta,
+                                 gmlp->d_sgu_proj_weight_grad, gmlp->ffn_dim),
+                      "SGU projection weight gradient");
     
-    // 7b. Also add gradient from the projection input
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_N,
-                            gmlp->hidden_dim, gmlp->batch_size, gmlp->ffn_dim,
-                            &alpha,
-                            gmlp->d_sgu_gate_weight, gmlp->hidden_dim,
-                            gmlp->d_sgu_proj_grad, gmlp->ffn_dim,
-                            &add_beta, // Add to existing gradient
-                            gmlp->d_proj_in_grad, gmlp->hidden_dim));
+    // 7. Gradient of sgu_gate_weight
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                 gmlp->ffn_dim, half_hidden, gmlp->batch_size,
+                                 &alpha,
+                                 gmlp->d_sgu_gate_grad, gmlp->ffn_dim,
+                                 gmlp->d_u_part, half_hidden,
+                                 &beta,
+                                 gmlp->d_sgu_gate_weight_grad, gmlp->ffn_dim),
+                      "SGU gate weight gradient");
     
-    // 8. Compute pre-activation values for GELU gradient
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_T, CUBLAS_OP_T,
-                            gmlp->hidden_dim, gmlp->batch_size, gmlp->input_dim,
-                            &alpha,
-                            gmlp->d_proj_in_weight, gmlp->input_dim,
-                            gmlp->d_X, gmlp->input_dim,
-                            &beta,
-                            d_pre_activation, gmlp->hidden_dim));
+    // 8. Gradient flowing back to v_part
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                                 half_hidden, gmlp->batch_size, gmlp->ffn_dim,
+                                 &alpha,
+                                 gmlp->d_sgu_proj_weight, gmlp->ffn_dim,
+                                 gmlp->d_sgu_proj_grad, gmlp->ffn_dim,
+                                 &beta,
+                                 gmlp->d_v_part_grad, half_hidden),
+                      "Gradient to v_part");
     
-    // Gradient through GELU activation
+    // 9. Gradient flowing back to u_part
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                                 half_hidden, gmlp->batch_size, gmlp->ffn_dim,
+                                 &alpha,
+                                 gmlp->d_sgu_gate_weight, gmlp->ffn_dim,
+                                 gmlp->d_sgu_gate_grad, gmlp->ffn_dim,
+                                 &beta,
+                                 gmlp->d_u_part_grad, half_hidden),
+                      "Gradient to u_part");
+    
+    // 10. Combine u_part_grad and v_part_grad to form proj_in_grad
+    checkCudaErrors(cudaMemcpy(gmlp->d_proj_in_grad, gmlp->d_u_part_grad, 
+                   gmlp->batch_size * half_hidden * sizeof(float), cudaMemcpyDeviceToDevice),
+                   "Copy u_part_grad to proj_in_grad");
+    checkCudaErrors(cudaMemcpy(gmlp->d_proj_in_grad + gmlp->batch_size * half_hidden, gmlp->d_v_part_grad, 
+                   gmlp->batch_size * half_hidden * sizeof(float), cudaMemcpyDeviceToDevice),
+                   "Copy v_part_grad to proj_in_grad");
+    
+    // 11. Gradient through GELU activation
     num_blocks = (gmlp->batch_size * gmlp->hidden_dim + block_size - 1) / block_size;
-    gelu_derivative_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_proj_in_grad,
-        d_pre_activation,
-        gmlp->d_proj_in_grad,
-        gmlp->batch_size * gmlp->hidden_dim
-    );
+    gelu_backward_kernel<<<num_blocks, block_size>>>(gmlp->d_proj_in_grad, gmlp->d_proj_in_output, 
+                                                   gmlp->d_proj_in_grad, gmlp->batch_size * gmlp->hidden_dim);
+    checkCudaErrors(cudaGetLastError(), "GELU backward kernel launch");
     
-    // 9. Gradient to input projection weights
-    CHECK_CUBLAS(cublasSgemm(gmlp->cublas_handle,
-                            CUBLAS_OP_N, CUBLAS_OP_T,
-                            gmlp->input_dim, gmlp->hidden_dim, gmlp->batch_size,
-                            &alpha,
-                            gmlp->d_X, gmlp->input_dim,
-                            gmlp->d_proj_in_grad, gmlp->hidden_dim,
-                            &beta,
-                            gmlp->d_proj_in_weight_grad, gmlp->hidden_dim));
+    // 12. Gradient to input projection weights
+    // Copy input data to device again if it's not already there
+    checkCudaErrors(cudaMemcpy(gmlp->d_X, X, gmlp->batch_size * gmlp->input_dim * sizeof(float), 
+                   cudaMemcpyHostToDevice), "Copy X to device for backward pass");
     
-    // Clean up
-    cudaFree(d_pre_activation);
+    checkCublasErrors(cublasSgemm(gmlp->cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                 gmlp->hidden_dim, gmlp->input_dim, gmlp->batch_size,
+                                 &alpha,
+                                 gmlp->d_proj_in_grad, gmlp->hidden_dim,
+                                 gmlp->d_X, gmlp->input_dim,
+                                 &beta,
+                                 gmlp->d_proj_in_weight_grad, gmlp->hidden_dim),
+                      "Input projection weight gradient");
     
-    // Copy gradients back to host
-    CHECK_CUDA(cudaMemcpy(gmlp->proj_in_weight_grad, gmlp->d_proj_in_weight_grad,
-                         gmlp->hidden_dim * gmlp->input_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->sgu_gate_weight_grad, gmlp->d_sgu_gate_weight_grad,
-                         gmlp->ffn_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->sgu_proj_weight_grad, gmlp->d_sgu_proj_weight_grad,
-                         gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->proj_out_weight_grad, gmlp->d_proj_out_weight_grad,
-                         gmlp->output_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
+    // Copy gradients back to host for weight updates
+    checkCudaErrors(cudaMemcpy(gmlp->proj_in_weight_grad, gmlp->d_proj_in_weight_grad, 
+                   gmlp->hidden_dim * gmlp->input_dim * sizeof(float), cudaMemcpyDeviceToHost),
+                   "Copy proj_in_weight_grad to host");
+    checkCudaErrors(cudaMemcpy(gmlp->sgu_gate_weight_grad, gmlp->d_sgu_gate_weight_grad, 
+                   gmlp->ffn_dim * half_hidden * sizeof(float), cudaMemcpyDeviceToHost),
+                   "Copy sgu_gate_weight_grad to host");
+    checkCudaErrors(cudaMemcpy(gmlp->sgu_proj_weight_grad, gmlp->d_sgu_proj_weight_grad, 
+                   gmlp->ffn_dim * half_hidden * sizeof(float), cudaMemcpyDeviceToHost),
+                   "Copy sgu_proj_weight_grad to host");
+    checkCudaErrors(cudaMemcpy(gmlp->sgu_out_weight_grad, gmlp->d_sgu_out_weight_grad, 
+                   gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float), cudaMemcpyDeviceToHost),
+                   "Copy sgu_out_weight_grad to host");
+    checkCudaErrors(cudaMemcpy(gmlp->proj_out_weight_grad, gmlp->d_proj_out_weight_grad, 
+                   gmlp->output_dim * gmlp->hidden_dim * sizeof(float), cudaMemcpyDeviceToHost),
+                   "Copy proj_out_weight_grad to host");
 }
 
 // Update weights using AdamW
-void update_weights_gmlp(GMLP* gmlp, float learning_rate) {
+void update_weights_gpu_gmlp(GPU_GMLP* gmlp, float learning_rate) {
     gmlp->t++;  // Increment time step
+    int half_hidden = gmlp->hidden_dim / 2;
     
     float beta1_t = powf(gmlp->beta1, gmlp->t);
     float beta2_t = powf(gmlp->beta2, gmlp->t);
     float alpha_t = learning_rate * sqrtf(1.0f - beta2_t) / (1.0f - beta1_t);
     
-    // Copy updated Adam states to device
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_in_m, gmlp->proj_in_m,
-                         gmlp->hidden_dim * gmlp->input_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_in_v, gmlp->proj_in_v,
-                         gmlp->hidden_dim * gmlp->input_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_gate_m, gmlp->sgu_gate_m,
-                         gmlp->ffn_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_gate_v, gmlp->sgu_gate_v,
-                         gmlp->ffn_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_proj_m, gmlp->sgu_proj_m,
-                         gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_proj_v, gmlp->sgu_proj_v,
-                         gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_out_m, gmlp->proj_out_m,
-                         gmlp->output_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_out_v, gmlp->proj_out_v,
-                         gmlp->output_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    
-    int block_size = 256;
-    int num_blocks;
-    
     // Update projection in weights
-    num_blocks = (gmlp->hidden_dim * gmlp->input_dim + block_size - 1) / block_size;
-    adamw_update_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_proj_in_weight,
-        gmlp->d_proj_in_weight_grad,
-        gmlp->d_proj_in_m,
-        gmlp->d_proj_in_v,
-        gmlp->beta1,
-        gmlp->beta2,
-        gmlp->epsilon,
-        learning_rate,
-        gmlp->weight_decay,
-        alpha_t,
-        gmlp->batch_size,
-        gmlp->hidden_dim * gmlp->input_dim
-    );
+    for (int i = 0; i < gmlp->hidden_dim * gmlp->input_dim; i++) {
+        float grad = gmlp->proj_in_weight_grad[i] / gmlp->batch_size;
+        
+        gmlp->proj_in_m[i] = gmlp->beta1 * gmlp->proj_in_m[i] + (1.0f - gmlp->beta1) * grad;
+        gmlp->proj_in_v[i] = gmlp->beta2 * gmlp->proj_in_v[i] + (1.0f - gmlp->beta2) * grad * grad;
+        
+        float update = alpha_t * gmlp->proj_in_m[i] / (sqrtf(gmlp->proj_in_v[i]) + gmlp->epsilon);
+        gmlp->proj_in_weight[i] = gmlp->proj_in_weight[i] * (1.0f - learning_rate * gmlp->weight_decay) - update;
+    }
     
     // Update SGU gate weights
-    num_blocks = (gmlp->ffn_dim * gmlp->hidden_dim + block_size - 1) / block_size;
-    adamw_update_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_sgu_gate_weight,
-        gmlp->d_sgu_gate_weight_grad,
-        gmlp->d_sgu_gate_m,
-        gmlp->d_sgu_gate_v,
-        gmlp->beta1,
-        gmlp->beta2,
-        gmlp->epsilon,
-        learning_rate,
-        gmlp->weight_decay,
-        alpha_t,
-        gmlp->batch_size,
-        gmlp->ffn_dim * gmlp->hidden_dim
-    );
+    for (int i = 0; i < gmlp->ffn_dim * half_hidden; i++) {
+        float grad = gmlp->sgu_gate_weight_grad[i] / gmlp->batch_size;
+        
+        gmlp->sgu_gate_m[i] = gmlp->beta1 * gmlp->sgu_gate_m[i] + (1.0f - gmlp->beta1) * grad;
+        gmlp->sgu_gate_v[i] = gmlp->beta2 * gmlp->sgu_gate_v[i] + (1.0f - gmlp->beta2) * grad * grad;
+        
+        float update = alpha_t * gmlp->sgu_gate_m[i] / (sqrtf(gmlp->sgu_gate_v[i]) + gmlp->epsilon);
+        gmlp->sgu_gate_weight[i] = gmlp->sgu_gate_weight[i] * (1.0f - learning_rate * gmlp->weight_decay) - update;
+    }
     
     // Update SGU projection weights
-    num_blocks = (gmlp->hidden_dim * gmlp->ffn_dim + block_size - 1) / block_size;
-    adamw_update_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_sgu_proj_weight,
-        gmlp->d_sgu_proj_weight_grad,
-        gmlp->d_sgu_proj_m,
-        gmlp->d_sgu_proj_v,
-        gmlp->beta1,
-        gmlp->beta2,
-        gmlp->epsilon,
-        learning_rate,
-        gmlp->weight_decay,
-        alpha_t,
-        gmlp->batch_size,
-        gmlp->hidden_dim * gmlp->ffn_dim
-    );
+    for (int i = 0; i < gmlp->ffn_dim * half_hidden; i++) {
+        float grad = gmlp->sgu_proj_weight_grad[i] / gmlp->batch_size;
+        
+        gmlp->sgu_proj_m[i] = gmlp->beta1 * gmlp->sgu_proj_m[i] + (1.0f - gmlp->beta1) * grad;
+        gmlp->sgu_proj_v[i] = gmlp->beta2 * gmlp->sgu_proj_v[i] + (1.0f - gmlp->beta2) * grad * grad;
+        
+        float update = alpha_t * gmlp->sgu_proj_m[i] / (sqrtf(gmlp->sgu_proj_v[i]) + gmlp->epsilon);
+        gmlp->sgu_proj_weight[i] = gmlp->sgu_proj_weight[i] * (1.0f - learning_rate * gmlp->weight_decay) - update;
+    }
+    
+    // Update SGU output weights
+    for (int i = 0; i < gmlp->hidden_dim * gmlp->ffn_dim; i++) {
+        float grad = gmlp->sgu_out_weight_grad[i] / gmlp->batch_size;
+        
+        gmlp->sgu_out_m[i] = gmlp->beta1 * gmlp->sgu_out_m[i] + (1.0f - gmlp->beta1) * grad;
+        gmlp->sgu_out_v[i] = gmlp->beta2 * gmlp->sgu_out_v[i] + (1.0f - gmlp->beta2) * grad * grad;
+        
+        float update = alpha_t * gmlp->sgu_out_m[i] / (sqrtf(gmlp->sgu_out_v[i]) + gmlp->epsilon);
+        gmlp->sgu_out_weight[i] = gmlp->sgu_out_weight[i] * (1.0f - learning_rate * gmlp->weight_decay) - update;
+    }
     
     // Update projection out weights
-    num_blocks = (gmlp->output_dim * gmlp->hidden_dim + block_size - 1) / block_size;
-    adamw_update_kernel<<<num_blocks, block_size>>>(
-        gmlp->d_proj_out_weight,
-        gmlp->d_proj_out_weight_grad,
-        gmlp->d_proj_out_m,
-        gmlp->d_proj_out_v,
-        gmlp->beta1,
-        gmlp->beta2,
-        gmlp->epsilon,
-        learning_rate,
-        gmlp->weight_decay,
-        alpha_t,
-        gmlp->batch_size,
-        gmlp->output_dim * gmlp->hidden_dim
-    );
+    for (int i = 0; i < gmlp->output_dim * gmlp->hidden_dim; i++) {
+        float grad = gmlp->proj_out_weight_grad[i] / gmlp->batch_size;
+        
+        gmlp->proj_out_m[i] = gmlp->beta1 * gmlp->proj_out_m[i] + (1.0f - gmlp->beta1) * grad;
+        gmlp->proj_out_v[i] = gmlp->beta2 * gmlp->proj_out_v[i] + (1.0f - gmlp->beta2) * grad * grad;
+        
+        float update = alpha_t * gmlp->proj_out_m[i] / (sqrtf(gmlp->proj_out_v[i]) + gmlp->epsilon);
+        gmlp->proj_out_weight[i] = gmlp->proj_out_weight[i] * (1.0f - learning_rate * gmlp->weight_decay) - update;
+    }
     
-    // Copy updated weights and Adam states back to host
-    CHECK_CUDA(cudaMemcpy(gmlp->proj_in_weight, gmlp->d_proj_in_weight,
-                         gmlp->hidden_dim * gmlp->input_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->sgu_gate_weight, gmlp->d_sgu_gate_weight,
-                         gmlp->ffn_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->sgu_proj_weight, gmlp->d_sgu_proj_weight,
-                         gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->proj_out_weight, gmlp->d_proj_out_weight,
-                         gmlp->output_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    
-    CHECK_CUDA(cudaMemcpy(gmlp->proj_in_m, gmlp->d_proj_in_m,
-                         gmlp->hidden_dim * gmlp->input_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->proj_in_v, gmlp->d_proj_in_v,
-                         gmlp->hidden_dim * gmlp->input_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->sgu_gate_m, gmlp->d_sgu_gate_m,
-                         gmlp->ffn_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->sgu_gate_v, gmlp->d_sgu_gate_v,
-                         gmlp->ffn_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->sgu_proj_m, gmlp->d_sgu_proj_m,
-                         gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->sgu_proj_v, gmlp->d_sgu_proj_v,
-                         gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->proj_out_m, gmlp->d_proj_out_m,
-                         gmlp->output_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(gmlp->proj_out_v, gmlp->d_proj_out_v,
-                         gmlp->output_dim * gmlp->hidden_dim * sizeof(float),
-                         cudaMemcpyDeviceToHost));
+    // Copy updated weights back to device
+    checkCudaErrors(cudaMemcpy(gmlp->d_proj_in_weight, gmlp->proj_in_weight, 
+                   gmlp->hidden_dim * gmlp->input_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy updated proj_in_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_gate_weight, gmlp->sgu_gate_weight, 
+                   gmlp->ffn_dim * half_hidden * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy updated sgu_gate_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_proj_weight, gmlp->sgu_proj_weight, 
+                   gmlp->ffn_dim * half_hidden * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy updated sgu_proj_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_out_weight, gmlp->sgu_out_weight, 
+                   gmlp->hidden_dim * gmlp->ffn_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy updated sgu_out_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_proj_out_weight, gmlp->proj_out_weight, 
+                   gmlp->output_dim * gmlp->hidden_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy updated proj_out_weight to device");
 }
 
 // Save model weights to binary file
-void save_gmlp(GMLP* gmlp, const char* filename) {
+void save_gpu_gmlp(GPU_GMLP* gmlp, const char* filename) {
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error opening file for writing: %s\n", filename);
         return;
     }
+    
+    int half_hidden = gmlp->hidden_dim / 2;
     
     // Save dimensions
     fwrite(&gmlp->input_dim, sizeof(int), 1, file);
@@ -885,18 +793,21 @@ void save_gmlp(GMLP* gmlp, const char* filename) {
     
     // Save weights
     fwrite(gmlp->proj_in_weight, sizeof(float), gmlp->hidden_dim * gmlp->input_dim, file);
-    fwrite(gmlp->sgu_gate_weight, sizeof(float), gmlp->ffn_dim * gmlp->hidden_dim, file);
-    fwrite(gmlp->sgu_proj_weight, sizeof(float), gmlp->hidden_dim * gmlp->ffn_dim, file);
+    fwrite(gmlp->sgu_gate_weight, sizeof(float), gmlp->ffn_dim * half_hidden, file);
+    fwrite(gmlp->sgu_proj_weight, sizeof(float), gmlp->ffn_dim * half_hidden, file);
+    fwrite(gmlp->sgu_out_weight, sizeof(float), gmlp->hidden_dim * gmlp->ffn_dim, file);
     fwrite(gmlp->proj_out_weight, sizeof(float), gmlp->output_dim * gmlp->hidden_dim, file);
     
     // Save Adam state
     fwrite(&gmlp->t, sizeof(int), 1, file);
     fwrite(gmlp->proj_in_m, sizeof(float), gmlp->hidden_dim * gmlp->input_dim, file);
     fwrite(gmlp->proj_in_v, sizeof(float), gmlp->hidden_dim * gmlp->input_dim, file);
-    fwrite(gmlp->sgu_gate_m, sizeof(float), gmlp->ffn_dim * gmlp->hidden_dim, file);
-    fwrite(gmlp->sgu_gate_v, sizeof(float), gmlp->ffn_dim * gmlp->hidden_dim, file);
-    fwrite(gmlp->sgu_proj_m, sizeof(float), gmlp->hidden_dim * gmlp->ffn_dim, file);
-    fwrite(gmlp->sgu_proj_v, sizeof(float), gmlp->hidden_dim * gmlp->ffn_dim, file);
+    fwrite(gmlp->sgu_gate_m, sizeof(float), gmlp->ffn_dim * half_hidden, file);
+    fwrite(gmlp->sgu_gate_v, sizeof(float), gmlp->ffn_dim * half_hidden, file);
+    fwrite(gmlp->sgu_proj_m, sizeof(float), gmlp->ffn_dim * half_hidden, file);
+    fwrite(gmlp->sgu_proj_v, sizeof(float), gmlp->ffn_dim * half_hidden, file);
+    fwrite(gmlp->sgu_out_m, sizeof(float), gmlp->hidden_dim * gmlp->ffn_dim, file);
+    fwrite(gmlp->sgu_out_v, sizeof(float), gmlp->hidden_dim * gmlp->ffn_dim, file);
     fwrite(gmlp->proj_out_m, sizeof(float), gmlp->output_dim * gmlp->hidden_dim, file);
     fwrite(gmlp->proj_out_v, sizeof(float), gmlp->output_dim * gmlp->hidden_dim, file);
     
@@ -905,7 +816,7 @@ void save_gmlp(GMLP* gmlp, const char* filename) {
 }
 
 // Load model weights from binary file
-GMLP* load_gmlp(const char* filename, int custom_batch_size) {
+GPU_GMLP* load_gpu_gmlp(const char* filename, int custom_batch_size) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Error opening file for reading: %s\n", filename);
@@ -924,66 +835,53 @@ GMLP* load_gmlp(const char* filename, int custom_batch_size) {
     int batch_size = (custom_batch_size > 0) ? custom_batch_size : stored_batch_size;
     
     // Initialize network
-    GMLP* gmlp = init_gmlp(input_dim, hidden_dim, ffn_dim, output_dim, batch_size);
+    GPU_GMLP* gmlp = init_gpu_gmlp(input_dim, hidden_dim, ffn_dim, output_dim, batch_size);
+    if (!gmlp) {
+        fclose(file);
+        return NULL;
+    }
+    
+    int half_hidden = hidden_dim / 2;
     
     // Load weights
     fread(gmlp->proj_in_weight, sizeof(float), hidden_dim * input_dim, file);
-    fread(gmlp->sgu_gate_weight, sizeof(float), ffn_dim * hidden_dim, file);
-    fread(gmlp->sgu_proj_weight, sizeof(float), hidden_dim * ffn_dim, file);
+    fread(gmlp->sgu_gate_weight, sizeof(float), ffn_dim * half_hidden, file);
+    fread(gmlp->sgu_proj_weight, sizeof(float), ffn_dim * half_hidden, file);
+    fread(gmlp->sgu_out_weight, sizeof(float), hidden_dim * ffn_dim, file);
     fread(gmlp->proj_out_weight, sizeof(float), output_dim * hidden_dim, file);
     
     // Load Adam state
     fread(&gmlp->t, sizeof(int), 1, file);
     fread(gmlp->proj_in_m, sizeof(float), hidden_dim * input_dim, file);
     fread(gmlp->proj_in_v, sizeof(float), hidden_dim * input_dim, file);
-    fread(gmlp->sgu_gate_m, sizeof(float), ffn_dim * hidden_dim, file);
-    fread(gmlp->sgu_gate_v, sizeof(float), ffn_dim * hidden_dim, file);
-    fread(gmlp->sgu_proj_m, sizeof(float), hidden_dim * ffn_dim, file);
-    fread(gmlp->sgu_proj_v, sizeof(float), hidden_dim * ffn_dim, file);
+    fread(gmlp->sgu_gate_m, sizeof(float), ffn_dim * half_hidden, file);
+    fread(gmlp->sgu_gate_v, sizeof(float), ffn_dim * half_hidden, file);
+    fread(gmlp->sgu_proj_m, sizeof(float), ffn_dim * half_hidden, file);
+    fread(gmlp->sgu_proj_v, sizeof(float), ffn_dim * half_hidden, file);
+    fread(gmlp->sgu_out_m, sizeof(float), hidden_dim * ffn_dim, file);
+    fread(gmlp->sgu_out_v, sizeof(float), hidden_dim * ffn_dim, file);
     fread(gmlp->proj_out_m, sizeof(float), output_dim * hidden_dim, file);
     fread(gmlp->proj_out_v, sizeof(float), output_dim * hidden_dim, file);
     
-    // Copy weights to device
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_in_weight, gmlp->proj_in_weight,
-                         hidden_dim * input_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_gate_weight, gmlp->sgu_gate_weight,
-                         ffn_dim * hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_proj_weight, gmlp->sgu_proj_weight,
-                         hidden_dim * ffn_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_out_weight, gmlp->proj_out_weight,
-                         output_dim * hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    
-    // Copy Adam state to device
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_in_m, gmlp->proj_in_m,
-                         hidden_dim * input_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_in_v, gmlp->proj_in_v,
-                         hidden_dim * input_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_gate_m, gmlp->sgu_gate_m,
-                         ffn_dim * hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_gate_v, gmlp->sgu_gate_v,
-                         ffn_dim * hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_proj_m, gmlp->sgu_proj_m,
-                         hidden_dim * ffn_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_sgu_proj_v, gmlp->sgu_proj_v,
-                         hidden_dim * ffn_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_out_m, gmlp->proj_out_m,
-                         output_dim * hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(gmlp->d_proj_out_v, gmlp->proj_out_v,
-                         output_dim * hidden_dim * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    
     fclose(file);
+    
+    // Copy loaded weights to device
+    checkCudaErrors(cudaMemcpy(gmlp->d_proj_in_weight, gmlp->proj_in_weight, 
+                   hidden_dim * input_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy loaded proj_in_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_gate_weight, gmlp->sgu_gate_weight, 
+                   ffn_dim * half_hidden * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy loaded sgu_gate_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_proj_weight, gmlp->sgu_proj_weight, 
+                   ffn_dim * half_hidden * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy loaded sgu_proj_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_sgu_out_weight, gmlp->sgu_out_weight, 
+                   hidden_dim * ffn_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy loaded sgu_out_weight to device");
+    checkCudaErrors(cudaMemcpy(gmlp->d_proj_out_weight, gmlp->proj_out_weight, 
+                   output_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice),
+                   "Copy loaded proj_out_weight to device");
+    
     printf("Model loaded from %s\n", filename);
     
     return gmlp;
