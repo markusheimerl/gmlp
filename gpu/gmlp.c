@@ -15,10 +15,7 @@ int main() {
     const int output_dim = 4;
     const int num_samples = 1024;
     const int batch_size = num_samples; // Full batch training
-    
-    // Initialize CUDA
-    cudaFree(0); // Initialize CUDA context
-    
+
     // Generate synthetic data
     float *X, *y;
     generate_synthetic_data(&X, &y, num_samples, input_dim, output_dim);
@@ -30,17 +27,8 @@ int main() {
     const int num_epochs = 10000;
     const float learning_rate = 0.001f;
     
-    // Timing variables
-    float total_time = 0.0f;
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    
     printf("Starting GPU training with %d epochs...\n", num_epochs);
-    
-    // Start timing
-    cudaEventRecord(start, 0);
-    
+
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         // Forward pass
@@ -61,14 +49,6 @@ int main() {
             printf("Epoch [%d/%d], Loss: %.8f\n", epoch + 1, num_epochs, loss);
         }
     }
-    
-    // Stop timing
-    cudaEventRecord(stop, 0);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&total_time, start, stop);
-    
-    printf("Training completed in %.2f seconds (%.2f ms per epoch)\n", 
-           total_time / 1000.0f, total_time / num_epochs);
     
     // Get timestamp for filenames
     char model_fname[64], data_fname[64];
@@ -140,22 +120,12 @@ int main() {
         mae /= num_samples;
         printf("Mean Absolute Error for y%d: %.3f\n", i, mae);
     }
-    
-    // Compare with CPU version timing (if available)
-    printf("\nGPU training completed in %.2f seconds for %d epochs.\n", 
-           total_time / 1000.0f, num_epochs);
-    printf("Average time per epoch: %.2f ms\n", total_time / num_epochs);
-    
+  
     // Cleanup
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
     free(X);
     free(y);
     free_gmlp(gmlp);
     free_gmlp(loaded_gmlp);
-    
-    // Final CUDA cleanup
-    cudaDeviceReset();
-    
+
     return 0;
 }
