@@ -20,6 +20,13 @@ int main() {
     float *X, *y;
     generate_synthetic_data(&X, &y, num_samples, input_dim, output_dim);
     
+    // Copy data to GPU once before training
+    float *d_X, *d_y;
+    CHECK_CUDA(cudaMalloc(&d_X, batch_size * input_dim * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_y, batch_size * output_dim * sizeof(float)));
+    CHECK_CUDA(cudaMemcpy(d_X, X, batch_size * input_dim * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_y, y, batch_size * output_dim * sizeof(float), cudaMemcpyHostToDevice));
+    
     // Initialize gMLP network on GPU
     GMLP* gmlp = init_gmlp(input_dim, hidden_dim, ffn_dim, output_dim, batch_size);
     
@@ -32,14 +39,14 @@ int main() {
     // Training loop
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         // Forward pass
-        forward_pass_gmlp(gmlp, X);
+        forward_pass_gmlp(gmlp, d_X);
         
         // Calculate loss
-        float loss = calculate_loss_gmlp(gmlp, y);
+        float loss = calculate_loss_gmlp(gmlp, d_y);
         
         // Backward pass
         zero_gradients_gmlp(gmlp);
-        backward_pass_gmlp(gmlp, X);
+        backward_pass_gmlp(gmlp, d_X);
         
         // Update weights
         update_weights_gmlp(gmlp, learning_rate);
@@ -69,11 +76,11 @@ int main() {
     GMLP* loaded_gmlp = load_gmlp(model_fname, batch_size);
     
     // Forward pass with loaded model
-    forward_pass_gmlp(loaded_gmlp, X);
+    forward_pass_gmlp(loaded_gmlp, d_X);
+    get_predictions_gmlp(loaded_gmlp);
     
     // Calculate and print loss with loaded model
-    float verification_loss = calculate_loss_gmlp(loaded_gmlp, y);
-    printf("Loss with loaded model: %.8f\n", verification_loss);
+    printf("Loss with loaded model: %.8f\n", calculate_loss_gmlp(loaded_gmlp, d_y));
     
     printf("\nEvaluating model performance...\n");
     
@@ -89,7 +96,7 @@ int main() {
         float ss_res = 0.0f;
         float ss_tot = 0.0f;
         for (int j = 0; j < num_samples; j++) {
-            float diff_res = y[j * output_dim + i] - loaded_gmlp->predictions[j * output_dim + i];
+            float diff_res = y[j * output_dim + i] - loaded_gmlp->h_predictions[j * output_dim + i];
             float diff_tot = y[j * output_dim + i] - y_mean;
             ss_res += diff_res * diff_res;
             ss_tot += diff_tot * diff_tot;
@@ -106,7 +113,7 @@ int main() {
     for (int i = 0; i < output_dim; i++) {
         printf("\ny%d:\n", i);
         for (int j = 0; j < 15; j++) {
-            float pred = loaded_gmlp->predictions[j * output_dim + i];
+            float pred = loaded_gmlp->h_predictions[j * output_dim + i];
             float actual = y[j * output_dim + i];
             float diff = pred - actual;
             printf("Sample %d:\t%8.3f\t%8.3f\t%8.3f\n", j, pred, actual, diff);
@@ -115,7 +122,7 @@ int main() {
         // Calculate MAE for this output
         float mae = 0.0f;
         for (int j = 0; j < num_samples; j++) {
-            mae += fabs(loaded_gmlp->predictions[j * output_dim + i] - y[j * output_dim + i]);
+            mae += fabs(loaded_gmlp->h_predictions[j * output_dim + i] - y[j * output_dim + i]);
         }
         mae /= num_samples;
         printf("Mean Absolute Error for y%d: %.3f\n", i, mae);
@@ -124,6 +131,8 @@ int main() {
     // Cleanup
     free(X);
     free(y);
+    cudaFree(d_X);
+    cudaFree(d_y);
     free_gmlp(gmlp);
     free_gmlp(loaded_gmlp);
 
